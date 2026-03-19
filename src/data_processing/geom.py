@@ -2,6 +2,7 @@ from typing import Dict, List
 import torch
 from torch.nn.functional import one_hot
 from rdkit import Chem
+from rdkit.Chem.Scaffolds import MurckoScaffold
 
 from multiprocessing import Pool
 
@@ -83,14 +84,14 @@ def featurize_molecule(molecule: Chem.rdchem.Mol, atom_map_dict: Dict[str, int],
     try:
         Chem.SanitizeMol(molecule)
     except Chem.MolSanitizeException as e:
-        return None, None, None, None, None, None
+        return (None,) * 8
 
     # kekulize the molecule if not using explicit aromaticity
     if not explicit_aromaticity:
         try:
             Chem.Kekulize(molecule, clearAromaticFlags=True)
         except Chem.KekulizeException as e:
-            return None, None, None, None, None, None
+            return (None,) * 8
 
     # if explicit_hydrogens is False, remove all hydrogens from the molecule
     if not explicit_hydrogens:
@@ -98,7 +99,7 @@ def featurize_molecule(molecule: Chem.rdchem.Mol, atom_map_dict: Dict[str, int],
     
     if max_atoms is not None and molecule.GetNumAtoms() > max_atoms:
         print(f"Molecule has {molecule.GetNumAtoms()} atoms, exceeding max_atoms {max_atoms}", flush=True)
-        return None, None, None, None, None, None
+        return (None,) * 8
 
     # get positions
     positions = molecule.GetConformer().GetPositions()
@@ -113,7 +114,7 @@ def featurize_molecule(molecule: Chem.rdchem.Mol, atom_map_dict: Dict[str, int],
             atom_types_idx[i] = atom_map_dict[atom.GetSymbol()]
         except KeyError:
             print(f"Atom {atom.GetSymbol()} not in atom map", flush=True)
-            return None, None, None, None, None, None
+            return (None,) * 8
         
         atom_charges[i] = atom.GetFormalCharge()
 
@@ -137,7 +138,7 @@ def featurize_molecule(molecule: Chem.rdchem.Mol, atom_map_dict: Dict[str, int],
     elif torch.any(bond_types == 1.5):
         # Some molecules can retain aromatic bond orders after sanitization; skip them
         # in kekulized mode instead of crashing on an out-of-range bond class.
-        return None, None, None, None, None, None
+        return (None,) * 8
     edge_attr = bond_types.type(torch.int32)
     # edge_attr = one_hot(bond_types, num_classes=5).bool() # five bond classes: no bond, single, double, triple, aromatic
 
@@ -160,4 +161,44 @@ def featurize_molecule(molecule: Chem.rdchem.Mol, atom_map_dict: Dict[str, int],
 
     bond_order_counts[0] = n_unbonded
 
-    return positions, atom_types, atom_charges, edge_attr, edge_index, bond_order_counts
+    scaffold_atom_mask, scaffold_bond_mask = compute_scaffold_masks(molecule, edge_index)
+
+    return (
+        positions,
+        atom_types,
+        atom_charges,
+        edge_attr,
+        edge_index,
+        bond_order_counts,
+        scaffold_atom_mask,
+        scaffold_bond_mask,
+    )
+
+
+def compute_scaffold_masks(
+    molecule: Chem.rdchem.Mol, edge_index: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    scaffold_atom_mask = torch.zeros(molecule.GetNumAtoms(), dtype=torch.int32)
+    scaffold_bond_mask = torch.zeros(edge_index.shape[0], dtype=torch.int32)
+
+    scaffold = MurckoScaffold.GetScaffoldForMol(molecule)
+    if scaffold is None or scaffold.GetNumAtoms() == 0:
+        return scaffold_atom_mask, scaffold_bond_mask
+
+    match = molecule.GetSubstructMatch(scaffold)
+    if not match:
+        return scaffold_atom_mask, scaffold_bond_mask
+
+    scaffold_atom_mask[torch.tensor(match, dtype=torch.long)] = 1
+
+    scaffold_bonds = set()
+    for bond in scaffold.GetBonds():
+        begin_idx = match[bond.GetBeginAtomIdx()]
+        end_idx = match[bond.GetEndAtomIdx()]
+        scaffold_bonds.add(tuple(sorted((begin_idx, end_idx))))
+
+    for edge_idx, bond_atoms in enumerate(edge_index.tolist()):
+        if tuple(sorted((int(bond_atoms[0]), int(bond_atoms[1])))) in scaffold_bonds:
+            scaffold_bond_mask[edge_idx] = 1
+
+    return scaffold_atom_mask, scaffold_bond_mask

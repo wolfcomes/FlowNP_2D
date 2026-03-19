@@ -26,6 +26,12 @@ from src.data_processing.geom import featurize_molecule
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _mol_from_smiles_with_coords(smiles: str) -> Chem.Mol:
+    mol = Chem.MolFromSmiles(smiles)
+    AllChem.Compute2DCoords(mol)
+    return mol
+
+
 def _write_minimal_processed_split(
     processed_dir: Path, split_prefix: str, n_graphs: int = 1, n_atoms: int = 2
 ) -> None:
@@ -444,7 +450,47 @@ class ContractTests(unittest.TestCase):
         with patch("src.data_processing.geom.Chem.rdmolops.GetAdjacencyMatrix", return_value=aromatic_adj):
             result = featurize_molecule(mol, {"C": 0}, explicit_aromaticity=False)
 
-        self.assertEqual(result, (None, None, None, None, None, None))
+        self.assertEqual(result, (None, None, None, None, None, None, None, None))
+
+    def test_featurize_molecule_emits_scaffold_masks_for_ring_system(self):
+        mol = _mol_from_smiles_with_coords("C1CCCCC1")
+
+        (
+            positions,
+            atom_types,
+            atom_charges,
+            bond_types,
+            bond_idxs,
+            bond_order_counts,
+            scaffold_atom_mask,
+            scaffold_bond_mask,
+        ) = featurize_molecule(mol, {"C": 0}, explicit_aromaticity=False)
+
+        self.assertIsNotNone(positions)
+        self.assertEqual(scaffold_atom_mask.shape[0], atom_types.shape[0])
+        self.assertEqual(scaffold_bond_mask.shape[0], bond_idxs.shape[0])
+        self.assertGreater(int(scaffold_atom_mask.sum().item()), 0)
+        self.assertGreater(int(scaffold_bond_mask.sum().item()), 0)
+
+    def test_featurize_molecule_allows_empty_scaffold_masks_for_chain(self):
+        mol = _mol_from_smiles_with_coords("CCC")
+
+        (
+            positions,
+            atom_types,
+            atom_charges,
+            bond_types,
+            bond_idxs,
+            bond_order_counts,
+            scaffold_atom_mask,
+            scaffold_bond_mask,
+        ) = featurize_molecule(mol, {"C": 0}, explicit_aromaticity=False)
+
+        self.assertIsNotNone(positions)
+        self.assertEqual(scaffold_atom_mask.shape[0], atom_types.shape[0])
+        self.assertEqual(scaffold_bond_mask.shape[0], bond_idxs.shape[0])
+        self.assertEqual(int(scaffold_atom_mask.sum().item()), 0)
+        self.assertEqual(int(scaffold_bond_mask.sum().item()), 0)
 
     def test_qm9_preprocessing_does_not_expect_legacy_aromatic_return_value(self):
         source = (REPO_ROOT / "process_qm9.py").read_text()
