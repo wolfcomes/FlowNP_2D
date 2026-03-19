@@ -17,9 +17,9 @@ from src.models.vector_field_2d import CTMCVectorField2D
 
 
 class FlowMol(pl.LightningModule):
-    canonical_feat_order = ["a", "c", "e"]
-    node_feats = ["a", "c"]
-    edge_feats = ["e"]
+    canonical_feat_order = ["a", "c", "s", "e", "se"]
+    node_feats = ["a", "c", "s"]
+    edge_feats = ["e", "se"]
 
     def __init__(
         self,
@@ -81,7 +81,9 @@ class FlowMol(pl.LightningModule):
         self.n_cat_dict = {
             "a": self.n_atom_types,
             "c": self.n_atom_charges,
+            "s": 2,
             "e": self.n_bond_types,
+            "se": 2,
         }
 
         for feat in self.canonical_feat_order:
@@ -121,7 +123,9 @@ class FlowMol(pl.LightningModule):
         self.loss_fn_dict = {
             "a": categorical_loss_fn(reduction=reduction, **cat_kwargs),
             "c": categorical_loss_fn(reduction=reduction, **cat_kwargs),
+            "s": categorical_loss_fn(reduction=reduction, **cat_kwargs),
             "e": categorical_loss_fn(reduction=reduction, **cat_kwargs),
+            "se": categorical_loss_fn(reduction=reduction, **cat_kwargs),
         }
 
     def training_step(self, g: dgl.DGLGraph, batch_idx: int):
@@ -203,10 +207,10 @@ class FlowMol(pl.LightningModule):
 
         targets = {}
         for feat in self.canonical_feat_order:
-            data_src = g.edata if feat == "e" else g.ndata
+            data_src = g.edata if feat in self.edge_feats else g.ndata
             target = data_src[f"{feat}_1_true"]
 
-            if feat == "e":
+            if feat in self.edge_feats:
                 target = target[upper_edge_mask]
 
             if self.target_blur == 0.0:
@@ -215,7 +219,7 @@ class FlowMol(pl.LightningModule):
                 target = target + torch.randn_like(target) * self.target_blur
                 target = fn.softmax(target, dim=-1).argmax(dim=-1)
 
-            if feat == "e":
+            if feat in self.edge_feats:
                 xt_idxs = data_src[f"{feat}_t"][upper_edge_mask].argmax(-1)
             else:
                 xt_idxs = data_src[f"{feat}_t"].argmax(-1)
@@ -229,7 +233,7 @@ class FlowMol(pl.LightningModule):
         for feat_idx, feat in enumerate(self.canonical_feat_order):
             if self.time_scaled_loss:
                 weight = time_weights[:, feat_idx]
-                if feat == "e":
+                if feat in self.edge_feats:
                     weight = weight[edge_batch_idx][upper_edge_mask]
                 else:
                     weight = weight[node_batch_idx]
@@ -250,14 +254,15 @@ class FlowMol(pl.LightningModule):
         for feat in self.node_feats:
             prior_fn = inference_prior_register["ctmc"]
             args = [num_nodes, self.n_cat_dict[feat]]
-            kwargs = self.prior_config[feat]["kwargs"]
+            kwargs = self.prior_config.get(feat, {"kwargs": {}})["kwargs"]
             g.ndata[f"{feat}_0"] = prior_fn(*args, **kwargs).to(device)
 
-        g.edata["e_0"] = edge_prior(
-            upper_edge_mask,
-            self.prior_config["e"],
-            explicit_aromaticity=self.explicit_aromaticity,
-        ).to(device)
+        for feat in self.edge_feats:
+            g.edata[f"{feat}_0"] = edge_prior(
+                upper_edge_mask,
+                self.prior_config.get(feat),
+                n_edge_classes=self.n_cat_dict[feat],
+            ).to(device)
         g = self.add_random_node_features(g)
         return g
 

@@ -144,7 +144,7 @@ class CTMCVectorField2D(nn.Module):
         self.separate_mol_updaters = separate_mol_updaters
         self.exclude_charges = exclude_charges
         self.interpolant_scheduler = interpolant_scheduler
-        self.canonical_feat_order = canonical_feat_order
+        self.canonical_feat_order = list(canonical_feat_order)
         self.sde = False  # 2D版本不使用SDE
         self.self_conditioning = self_conditioning
 
@@ -161,19 +161,22 @@ class CTMCVectorField2D(nn.Module):
         self.n_cat_feats = {
             'a': n_atom_types,
             'c': n_charges,
-            'e': n_bond_types
+            's': 2,
+            'e': n_bond_types,
+            'se': 2,
         }
+
+        self.node_feats = [feat for feat in ['a', 'c', 's'] if feat in self.canonical_feat_order]
+        self.edge_feats = [feat for feat in ['e', 'se'] if feat in self.canonical_feat_order]
 
         n_mask_feats = int(has_mask)
         t_dim = 1
-        if self.exclude_charges:
-            mask_dim_node = 1
-        else:
-            mask_dim_node = 2
+        node_input_dim = sum(self.n_cat_feats[feat] + n_mask_feats for feat in self.node_feats) + t_dim
+        edge_input_dim = sum(self.n_cat_feats[feat] + n_mask_feats for feat in self.edge_feats)
 
         # 节点特征嵌入 (2D版本: 只处理分类特征和时间)
         self.scalar_embedding = nn.Sequential(
-            nn.Linear(n_atom_types + n_charges + t_dim + mask_dim_node*n_mask_feats, n_hidden),
+            nn.Linear(node_input_dim, n_hidden),
             nn.SiLU(),
             nn.Linear(n_hidden, n_hidden),
             nn.SiLU(),
@@ -192,7 +195,7 @@ class CTMCVectorField2D(nn.Module):
 
         # 边特征嵌入
         self.edge_embedding = nn.Sequential(
-            nn.Linear(n_bond_types + n_mask_feats, n_hidden_edge_feats),
+            nn.Linear(edge_input_dim, n_hidden_edge_feats),
             nn.SiLU(),
             nn.Linear(n_hidden_edge_feats, n_hidden_edge_feats),
             nn.SiLU(),
@@ -221,16 +224,26 @@ class CTMCVectorField2D(nn.Module):
             self.edge_updaters.append(EdgeUpdate2D(n_hidden, n_hidden_edge_feats))
 
         # 输出头
-        self.node_output_head = nn.Sequential(
-            nn.Linear(n_hidden, n_hidden),
-            nn.SiLU(),
-            nn.Linear(n_hidden, n_atom_types + n_charges)
+        self.node_output_heads = nn.ModuleDict(
+            {
+                feat: nn.Sequential(
+                    nn.Linear(n_hidden, n_hidden),
+                    nn.SiLU(),
+                    nn.Linear(n_hidden, self.n_cat_feats[feat]),
+                )
+                for feat in self.node_feats
+            }
         )
 
-        self.to_edge_logits = nn.Sequential(
-            nn.Linear(n_hidden_edge_feats, n_hidden_edge_feats),
-            nn.SiLU(),
-            nn.Linear(n_hidden_edge_feats, n_bond_types)
+        self.edge_output_heads = nn.ModuleDict(
+            {
+                feat: nn.Sequential(
+                    nn.Linear(n_hidden_edge_feats, n_hidden_edge_feats),
+                    nn.SiLU(),
+                    nn.Linear(n_hidden_edge_feats, self.n_cat_feats[feat]),
+                )
+                for feat in self.edge_feats
+            }
         )
 
         self.eta = stochasticity
@@ -263,7 +276,9 @@ class CTMCVectorField2D(nn.Module):
         self.mask_idxs = {
             'a': self.n_atom_types,
             'c': self.n_charges,
+            's': self.n_cat_feats['s'],
             'e': self.n_bond_types,
+            'se': self.n_cat_feats['se'],
         }
     
     def sample_conditional_path(self, g, t, node_batch_idx, edge_batch_idx, upper_edge_mask):
@@ -273,30 +288,33 @@ class CTMCVectorField2D(nn.Module):
         _, alpha_t = self.interpolant_scheduler.interpolant_weights(t)
 
         device = g.device
-        t_node = t[node_batch_idx]
 
         # 处理节点分类特征
-        for feat, feat_idx in zip(['a', 'c'], [0, 1]):
+        for feat in self.node_feats:
+            feat_idx = self.canonical_feat_order.index(feat)
             if self.mask_idxs[feat] == 0:
                 continue
             xt = g.ndata[f'{feat}_1_true'].argmax(-1)
             alpha_t_feat = alpha_t[:, feat_idx][node_batch_idx]
             xt[torch.rand(g.num_nodes(), device=device) < 1 - alpha_t_feat] = self.mask_idxs[feat]
-            g.ndata[f'{feat}_t'] = one_hot(xt, num_classes=self.n_cat_feats[feat] + 1)
+            g.ndata[f'{feat}_t'] = one_hot(
+                xt, num_classes=self.n_cat_feats[feat] + 1
+            ).float()
 
         # 处理边特征
         num_edges = int(g.num_edges() // 2)
-        e_idx = self.canonical_feat_order.index('e')
-        alpha_t_e = alpha_t[:, e_idx][edge_batch_idx][upper_edge_mask]
-        et_upper = g.edata['e_1_true'][upper_edge_mask].argmax(-1)
-        et_upper[torch.rand(num_edges, device=device) < 1 - alpha_t_e] = self.mask_idxs['e']
-        
-        n, d = g.edata['e_1_true'].shape
-        e_t = torch.zeros((n, d + 1), dtype=g.edata['e_1_true'].dtype, device=g.device)
-        et_upper_onehot = one_hot(et_upper, num_classes=self.n_cat_feats['e'] + 1).float()
-        e_t[upper_edge_mask] = et_upper_onehot
-        e_t[~upper_edge_mask] = et_upper_onehot
-        g.edata['e_t'] = e_t
+        for feat in self.edge_feats:
+            feat_idx = self.canonical_feat_order.index(feat)
+            alpha_t_e = alpha_t[:, feat_idx][edge_batch_idx][upper_edge_mask]
+            et_upper = g.edata[f'{feat}_1_true'][upper_edge_mask].argmax(-1)
+            et_upper[torch.rand(num_edges, device=device) < 1 - alpha_t_e] = self.mask_idxs[feat]
+
+            n, d = g.edata[f'{feat}_1_true'].shape
+            e_t = torch.zeros((n, d + 1), dtype=g.edata[f'{feat}_1_true'].dtype, device=g.device)
+            et_upper_onehot = one_hot(et_upper, num_classes=self.n_cat_feats[feat] + 1).float()
+            e_t[upper_edge_mask] = et_upper_onehot
+            e_t[~upper_edge_mask] = et_upper_onehot
+            g.edata[f'{feat}_t'] = e_t
 
         return g
 
@@ -309,13 +327,8 @@ class CTMCVectorField2D(nn.Module):
 
         with g.local_scope():
             # 收集节点和边特征
-            node_scalar_features = [
-                g.ndata['a_t'],
-                t[node_batch_idx].unsqueeze(-1)
-            ]
-
-            if not self.exclude_charges:
-                node_scalar_features.append(g.ndata['c_t'])
+            node_scalar_features = [g.ndata[f'{feat}_t'] for feat in self.node_feats]
+            node_scalar_features.append(t[node_batch_idx].unsqueeze(-1))
 
             node_scalar_features = torch.cat(node_scalar_features, dim=-1).to(device)
             node_scalar_features = self.scalar_embedding(node_scalar_features)
@@ -331,7 +344,7 @@ class CTMCVectorField2D(nn.Module):
                     )
                 node_scalar_features = node_scalar_features + self.random_node_gate * self.random_node_embedding(random_node_features)
 
-            edge_features = g.edata['e_t']
+            edge_features = torch.cat([g.edata[f'{feat}_t'] for feat in self.edge_feats], dim=-1)
             edge_features = self.edge_embedding(edge_features)
 
         # 自条件化处理 (如果启用)
@@ -371,32 +384,22 @@ class CTMCVectorField2D(nn.Module):
 
                     edge_features = self.edge_updaters[updater_idx](g, node_scalar_features, edge_features)
 
-        # 预测最终的原子类型和电荷logits
-        node_scalar_features = self.node_output_head(node_scalar_features)
-        atom_type_logits = node_scalar_features[:, :self.n_atom_types]
-        if not self.exclude_charges:
-            atom_charge_logits = node_scalar_features[:, self.n_atom_types:]
-        else:
-            atom_charge_logits = None
-
         # 预测边logits
         ue_feats = edge_features[upper_edge_mask]
         le_feats = edge_features[~upper_edge_mask]
-        edge_logits = self.to_edge_logits(ue_feats + le_feats)
+        edge_pair_features = ue_feats + le_feats
 
         # 构建预测特征字典
-        dst_dict = {
-            'a': atom_type_logits,
-            'e': edge_logits
-        }
-        if not self.exclude_charges:
-            dst_dict['c'] = atom_charge_logits
+        dst_dict = {}
+        for feat in self.node_feats:
+            dst_dict[feat] = self.node_output_heads[feat](node_scalar_features)
+        for feat in self.edge_feats:
+            dst_dict[feat] = self.edge_output_heads[feat](edge_pair_features)
 
         # 如果需要,对分类特征应用softmax
         if apply_softmax:
             for feat in dst_dict.keys():
-                if feat in ['a', 'c', 'e']:
-                    dst_dict[feat] = torch.softmax(dst_dict[feat], dim=-1)
+                dst_dict[feat] = torch.softmax(dst_dict[feat], dim=-1)
 
         return dst_dict
 
@@ -429,7 +432,7 @@ class CTMCVectorField2D(nn.Module):
 
         # 设置 g_t = g_0
         for feat in self.canonical_feat_order:
-            if feat == 'e':
+            if feat in self.edge_feats:
                 data_src = g.edata
             else:
                 data_src = g.ndata
@@ -438,7 +441,7 @@ class CTMCVectorField2D(nn.Module):
         if visualize:
             traj_frames = {}
             for feat in self.canonical_feat_order:
-                if feat == "e":
+                if feat in self.edge_feats:
                     data_src = g.edata
                     split_sizes = g.batch_num_edges()
                 else:
@@ -483,13 +486,13 @@ class CTMCVectorField2D(nn.Module):
 
             if visualize:
                 for feat in self.canonical_feat_order:
-                    if feat == "e":
+                    if feat in self.edge_feats:
                         g_data_src = g.edata
                     else:
                         g_data_src = g.ndata
 
                     frame = g_data_src[f'{feat}_t'].detach().cpu()
-                    if feat == 'e':
+                    if feat in self.edge_feats:
                         split_sizes = g.batch_num_edges()
                     else:
                         split_sizes = g.batch_num_nodes()
@@ -504,7 +507,7 @@ class CTMCVectorField2D(nn.Module):
 
         # 设置 g_1 = g_t
         for feat in self.canonical_feat_order:
-            if feat == "e":
+            if feat in self.edge_feats:
                 g_data_src = g.edata
             else:
                 g_data_src = g.ndata
@@ -581,14 +584,14 @@ class CTMCVectorField2D(nn.Module):
 
         # 对节点分类特征进行积分步骤
         for feat_idx, feat in enumerate(self.canonical_feat_order):
-            if feat == 'e':
+            if feat in self.edge_feats:
                 data_src = g.edata
             else:
                 data_src = g.ndata
 
             xt = data_src[f'{feat}_t'].argmax(-1)
 
-            if feat == 'e':
+            if feat in self.edge_feats:
                 xt = xt[upper_edge_mask]
 
             p_s_1 = dst_dict[feat]
@@ -605,11 +608,11 @@ class CTMCVectorField2D(nn.Module):
                                 alpha_t_prime=alpha_t_prime_i[feat_idx],
                                 dt=dt, 
                                 batch_size=g.batch_size, 
-                                batch_num_nodes=g.batch_num_edges()//2 if feat == 'e' else g.batch_num_nodes(), 
+                                batch_num_nodes=g.batch_num_edges()//2 if feat in self.edge_feats else g.batch_num_nodes(), 
                                 n_classes=self.n_cat_feats[feat]+1,
                                 mask_index=self.mask_idxs[feat],
                                 last_step=last_step,
-                                batch_idx=edge_batch_idx[upper_edge_mask] if feat == 'e' else node_batch_idx,
+                                batch_idx=edge_batch_idx[upper_edge_mask] if feat in self.edge_feats else node_batch_idx,
                                 )
 
             elif dfm_type == 'gat':
@@ -623,20 +626,20 @@ class CTMCVectorField2D(nn.Module):
                     forward_weight=forward_weight_func(t_i),
                     dt=dt,
                     batch_size=g.batch_size,
-                    batch_num_nodes=g.batch_num_edges()//2 if feat == 'e' else g.batch_num_nodes(),
+                    batch_num_nodes=g.batch_num_edges()//2 if feat in self.edge_feats else g.batch_num_nodes(),
                     n_classes=self.n_cat_feats[feat]+1,
                     mask_index=self.mask_idxs[feat],
-                    batch_idx=edge_batch_idx[upper_edge_mask] if feat == 'e' else node_batch_idx,
+                    batch_idx=edge_batch_idx[upper_edge_mask] if feat in self.edge_feats else node_batch_idx,
                 )
                                 
             # 如果是边特征,需要修改xt和x_1_sampled以包含上下边
-            if feat == 'e':
-                e_t = torch.zeros_like(g.edata['e_t'])
+            if feat in self.edge_feats:
+                e_t = torch.zeros_like(g.edata[f'{feat}_t'])
                 e_t[upper_edge_mask] = xt
                 e_t[~upper_edge_mask] = xt
                 xt = e_t
 
-                e_1_sampled = torch.zeros_like(g.edata['e_t'])
+                e_1_sampled = torch.zeros_like(g.edata[f'{feat}_t'])
                 e_1_sampled[upper_edge_mask] = x_1_sampled
                 e_1_sampled[~upper_edge_mask] = x_1_sampled
                 x_1_sampled = e_1_sampled

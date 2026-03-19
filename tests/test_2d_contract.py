@@ -157,6 +157,31 @@ def _minimal_config(processed_dir: Path) -> dict:
     }
 
 
+def _minimal_scaffold_config(processed_dir: Path) -> dict:
+    config = _minimal_config(processed_dir)
+    config["interpolant_scheduler"] = {
+        "schedule_type": {
+            "a": "linear",
+            "c": "linear",
+            "s": "linear",
+            "e": "linear",
+            "se": "linear",
+        },
+        "params": {
+            "a": 1.0,
+            "c": 1.0,
+            "s": 1.0,
+            "e": 1.0,
+            "se": 1.0,
+        },
+    }
+    config["mol_fm"]["prior_config"]["s"] = {"align": False, "kwargs": {}}
+    config["mol_fm"]["prior_config"]["se"] = {"align": False, "kwargs": {}}
+    config["mol_fm"]["total_loss_weights"]["s"] = 0.5
+    config["mol_fm"]["total_loss_weights"]["se"] = 1.0
+    return config
+
+
 def _make_two_atom_batch(edge_state_idx: int) -> dgl.DGLGraph:
     graph = dgl.graph(([0, 1], [1, 0]), num_nodes=2)
     graph = dgl.batch([graph])
@@ -382,6 +407,34 @@ class ContractTests(unittest.TestCase):
             model = model_from_config(config)
             losses = model(batch)
             self.assertEqual(set(losses.keys()), {"a", "c", "e"})
+
+    def test_model_tracks_scaffold_features_in_loss_and_prior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processed_dir = Path(tmpdir) / "processed"
+            processed_dir.mkdir()
+            for split in ("train_data", "val_data"):
+                _write_minimal_processed_split(processed_dir, split)
+            _write_training_artifacts(processed_dir)
+
+            config = _minimal_scaffold_config(processed_dir)
+            dm = data_module_from_config(config)
+            dm.setup("fit")
+            batch = next(iter(dm.train_dataloader()))
+
+            model = model_from_config(config)
+            self.assertEqual(model.canonical_feat_order, ["a", "c", "s", "e", "se"])
+
+            losses = model(batch)
+            self.assertEqual(set(losses.keys()), {"a", "c", "s", "e", "se"})
+
+            sample_graph = dgl.batch([dgl.graph(([0, 1], [1, 0]), num_nodes=2)])
+            sample_graph = model.sample_prior(
+                sample_graph,
+                node_batch_idx=torch.zeros(2, dtype=torch.long),
+                upper_edge_mask=torch.tensor([True, False]),
+            )
+            self.assertIn("s_0", sample_graph.ndata)
+            self.assertIn("se_0", sample_graph.edata)
 
     def test_data_module_respects_max_num_edges_when_batching(self):
         with tempfile.TemporaryDirectory() as tmpdir:
