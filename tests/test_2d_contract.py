@@ -112,8 +112,14 @@ def _minimal_config(processed_dir: Path) -> dict:
             "explicit_aromaticity": False,
         },
         "interpolant_scheduler": {
-            "schedule_type": {"a": "linear", "c": "linear", "e": "linear"},
-            "params": {"a": 1.0, "c": 1.0, "e": 1.0},
+            "schedule_type": {
+                "a": "linear",
+                "c": "linear",
+                "s": "linear",
+                "e": "linear",
+                "se": "linear",
+            },
+            "params": {"a": 1.0, "c": 1.0, "s": 1.0, "e": 1.0, "se": 1.0},
         },
         "lr_scheduler": {
             "base_lr": 1e-4,
@@ -126,11 +132,13 @@ def _minimal_config(processed_dir: Path) -> dict:
             "prior_config": {
                 "a": {"align": False, "kwargs": {}},
                 "c": {"align": False, "kwargs": {}},
+                "s": {"align": False, "kwargs": {}},
                 "e": {"align": False, "kwargs": {}},
+                "se": {"align": False, "kwargs": {}},
             },
             "target_blur": 0.0,
             "time_scaled_loss": False,
-            "total_loss_weights": {"a": 1.0, "c": 1.0, "e": 1.0},
+            "total_loss_weights": {"a": 1.0, "c": 1.0, "s": 0.5, "e": 1.0, "se": 1.0},
             "weight_ae": False,
             "exclude_charges": False,
         },
@@ -158,28 +166,7 @@ def _minimal_config(processed_dir: Path) -> dict:
 
 
 def _minimal_scaffold_config(processed_dir: Path) -> dict:
-    config = _minimal_config(processed_dir)
-    config["interpolant_scheduler"] = {
-        "schedule_type": {
-            "a": "linear",
-            "c": "linear",
-            "s": "linear",
-            "e": "linear",
-            "se": "linear",
-        },
-        "params": {
-            "a": 1.0,
-            "c": 1.0,
-            "s": 1.0,
-            "e": 1.0,
-            "se": 1.0,
-        },
-    }
-    config["mol_fm"]["prior_config"]["s"] = {"align": False, "kwargs": {}}
-    config["mol_fm"]["prior_config"]["se"] = {"align": False, "kwargs": {}}
-    config["mol_fm"]["total_loss_weights"]["s"] = 0.5
-    config["mol_fm"]["total_loss_weights"]["se"] = 1.0
-    return config
+    return _minimal_config(processed_dir)
 
 
 def _make_two_atom_batch(edge_state_idx: int) -> dgl.DGLGraph:
@@ -221,10 +208,12 @@ class ContractTests(unittest.TestCase):
             self.assertNotIn("x_1_true", batch.ndata)
             self.assertIn("a_1_true", batch.ndata)
             self.assertIn("c_1_true", batch.ndata)
+            self.assertIn("s_1_true", batch.ndata)
             self.assertIn("e_1_true", batch.edata)
+            self.assertIn("se_1_true", batch.edata)
 
             model = model_from_config(config)
-            self.assertEqual(model.canonical_feat_order, ["a", "c", "e"])
+            self.assertEqual(model.canonical_feat_order, ["a", "c", "s", "e", "se"])
 
     def test_qm9_dataset_loads_scaffold_node_and_edge_features(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -299,6 +288,19 @@ class ContractTests(unittest.TestCase):
                 "sde",
             ):
                 self.assertNotIn(bad_key, vector_cfg)
+
+    def test_active_2d_configs_include_scaffold_feature_keys(self):
+        for path_str in ("configs/qm9_ctmc.yaml", "configs/coconut_ctmc.yaml"):
+            config = yaml.safe_load((REPO_ROOT / path_str).read_text())
+
+            self.assertIn("s", config["interpolant_scheduler"]["params"])
+            self.assertIn("se", config["interpolant_scheduler"]["params"])
+            self.assertIn("s", config["interpolant_scheduler"]["schedule_type"])
+            self.assertIn("se", config["interpolant_scheduler"]["schedule_type"])
+            self.assertIn("s", config["mol_fm"]["prior_config"])
+            self.assertIn("se", config["mol_fm"]["prior_config"])
+            self.assertIn("s", config["mol_fm"]["total_loss_weights"])
+            self.assertIn("se", config["mol_fm"]["total_loss_weights"])
 
     def test_build_molecule_can_generate_rdkit_coords_without_input_positions(self):
         mol = build_molecule(
@@ -406,7 +408,7 @@ class ContractTests(unittest.TestCase):
 
             model = model_from_config(config)
             losses = model(batch)
-            self.assertEqual(set(losses.keys()), {"a", "c", "e"})
+            self.assertEqual(set(losses.keys()), {"a", "c", "s", "e", "se"})
 
     def test_model_tracks_scaffold_features_in_loss_and_prior(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -757,7 +759,9 @@ class ContractTests(unittest.TestCase):
                 prior_config={
                     "a": {"align": False, "kwargs": {}},
                     "c": {"align": False, "kwargs": {}},
+                    "s": {"align": False, "kwargs": {}},
                     "e": {"align": False, "kwargs": {}},
+                    "se": {"align": False, "kwargs": {}},
                 },
                 vector_field_config={
                     "n_hidden": 16,
@@ -768,8 +772,14 @@ class ContractTests(unittest.TestCase):
                     "n_random_node_feats": 4,
                 },
                 interpolant_scheduler_config={
-                    "schedule_type": {"a": "linear", "c": "linear", "e": "linear"},
-                    "params": {"a": 1.0, "c": 1.0, "e": 1.0},
+                    "schedule_type": {
+                        "a": "linear",
+                        "c": "linear",
+                        "s": "linear",
+                        "e": "linear",
+                        "se": "linear",
+                    },
+                    "params": {"a": 1.0, "c": 1.0, "s": 1.0, "e": 1.0, "se": 1.0},
                 },
                 lr_scheduler_config={
                     "base_lr": 1e-4,

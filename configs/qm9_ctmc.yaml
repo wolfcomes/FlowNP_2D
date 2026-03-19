@@ -20,11 +20,15 @@ interpolant_scheduler:
   params:
     a: 1.4
     c: 1.4
+    s: 1.0
     e: 1.4
+    se: 1.0
   schedule_type:
     a: linear
     c: linear
+    s: linear
     e: linear
+    se: linear
 lr_scheduler:
   base_lr: 0.00025
   restart_interval: 19
@@ -39,7 +43,13 @@ mol_fm:
     c:
       align: false
       kwargs: {}
+    s:
+      align: false
+      kwargs: {}
     e:
+      align: false
+      kwargs: {}
+    se:
       align: false
       kwargs: {}
   target_blur: 0.0
@@ -47,7 +57,9 @@ mol_fm:
   total_loss_weights:
     a: 0.4
     c: 1.0
+    s: 0.5
     e: 2.0
+    se: 1.0
   weight_ae: true
   exclude_charges: false
 
