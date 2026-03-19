@@ -133,6 +133,8 @@ def process_split(split_indices, split_name, args, dataset_config, sdf_file: Pat
     all_atom_charges = []
     all_bond_types = []
     all_bond_idxs = []
+    all_scaffold_atom_masks = []
+    all_scaffold_bond_masks = []
     n_bond_orders = 5 if args.explicit_aromaticity else 4
     all_bond_order_counts = torch.zeros(n_bond_orders, dtype=torch.int64)
 
@@ -152,7 +154,17 @@ def process_split(split_indices, split_name, args, dataset_config, sdf_file: Pat
     for molecule_chunk in tqdm_iterator:
 
         # TODO: we should collect all the molecules from each individual list into a single list and then featurize them all at once - this would make the multiprocessing actually useful
-        positions, atom_types, atom_charges, bond_types, bond_idxs, failed_idx, bond_order_counts = mol_featurizer.featurize_molecules(molecule_chunk)
+        (
+            positions,
+            atom_types,
+            atom_charges,
+            bond_types,
+            bond_idxs,
+            scaffold_atom_masks,
+            scaffold_bond_masks,
+            failed_idx,
+            bond_order_counts,
+        ) = mol_featurizer.featurize_molecules(molecule_chunk)
 
         failed_molecules += len(failed_idx)
         failed_molecules_bar.update(len(failed_idx))
@@ -163,6 +175,8 @@ def process_split(split_indices, split_name, args, dataset_config, sdf_file: Pat
         all_atom_charges.extend(atom_charges)
         all_bond_types.extend(bond_types)
         all_bond_idxs.extend(bond_idxs)
+        all_scaffold_atom_masks.extend(scaffold_atom_masks)
+        all_scaffold_bond_masks.extend(scaffold_bond_masks)
         all_bond_order_counts += bond_order_counts
     # get number of atoms in every data point
     n_atoms_list = [ x.shape[0] for x in all_positions ]
@@ -178,6 +192,8 @@ def process_split(split_indices, split_name, args, dataset_config, sdf_file: Pat
     all_atom_charges = torch.concatenate(all_atom_charges, dim=0)
     all_bond_types = torch.concatenate(all_bond_types, dim=0)
     all_bond_idxs = torch.concatenate(all_bond_idxs, dim=0)
+    all_scaffold_atom_masks = torch.concatenate(all_scaffold_atom_masks, dim=0)
+    all_scaffold_bond_masks = torch.concatenate(all_scaffold_bond_masks, dim=0)
 
     # create an array of indicies to keep track of the start_idx and end_idx of each molecule's node features
     node_idx_array = torch.zeros((len(n_atoms_list), 2), dtype=torch.int32)
@@ -201,6 +217,8 @@ def process_split(split_indices, split_name, args, dataset_config, sdf_file: Pat
         'atom_charges': all_atom_charges,
         'bond_types': all_bond_types,
         'bond_idxs': all_bond_idxs,
+        'scaffold_atom_mask': all_scaffold_atom_masks,
+        'scaffold_bond_mask': all_scaffold_bond_masks,
         'node_idx_array': node_idx_array,
         'edge_idx_array': edge_idx_array,
     }

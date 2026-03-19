@@ -39,6 +39,8 @@ def _write_minimal_processed_split(
     atom_charges = []
     bond_types = []
     bond_idxs = []
+    scaffold_atom_masks = []
+    scaffold_bond_masks = []
     node_idx_array = []
     edge_idx_array = []
     smiles = []
@@ -48,15 +50,23 @@ def _write_minimal_processed_split(
     for graph_idx in range(n_graphs):
         atom_types.append(torch.tensor([[1, 0]] * n_atoms, dtype=torch.bool))
         atom_charges.append(torch.zeros(n_atoms, dtype=torch.int32))
+        atom_scaffold_mask = torch.zeros(n_atoms, dtype=torch.int32)
+        if n_atoms > 0:
+            atom_scaffold_mask[0] = 1
+        scaffold_atom_masks.append(atom_scaffold_mask)
 
         graph_bond_idxs = []
         if n_atoms > 1:
             graph_bond_idxs = [[i, i + 1] for i in range(n_atoms - 1)]
             bond_types.append(torch.ones(len(graph_bond_idxs), dtype=torch.int32))
             bond_idxs.append(torch.tensor(graph_bond_idxs, dtype=torch.int32))
+            bond_scaffold_mask = torch.zeros(len(graph_bond_idxs), dtype=torch.int32)
+            bond_scaffold_mask[0] = 1
+            scaffold_bond_masks.append(bond_scaffold_mask)
         else:
             bond_types.append(torch.zeros(0, dtype=torch.int32))
             bond_idxs.append(torch.zeros((0, 2), dtype=torch.int32))
+            scaffold_bond_masks.append(torch.zeros(0, dtype=torch.int32))
 
         node_idx_array.append([node_offset, node_offset + n_atoms])
         edge_idx_array.append([edge_offset, edge_offset + len(graph_bond_idxs)])
@@ -71,6 +81,8 @@ def _write_minimal_processed_split(
         "atom_charges": torch.cat(atom_charges, dim=0),
         "bond_types": torch.cat(bond_types, dim=0),
         "bond_idxs": torch.cat(bond_idxs, dim=0),
+        "scaffold_atom_mask": torch.cat(scaffold_atom_masks, dim=0),
+        "scaffold_bond_mask": torch.cat(scaffold_bond_masks, dim=0),
         "node_idx_array": torch.tensor(node_idx_array, dtype=torch.int32),
         "edge_idx_array": torch.tensor(edge_idx_array, dtype=torch.int32),
     }
@@ -188,6 +200,26 @@ class ContractTests(unittest.TestCase):
 
             model = model_from_config(config)
             self.assertEqual(model.canonical_feat_order, ["a", "c", "e"])
+
+    def test_qm9_dataset_loads_scaffold_node_and_edge_features(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processed_dir = Path(tmpdir) / "processed"
+            processed_dir.mkdir()
+            for split in ("train_data", "val_data"):
+                _write_minimal_processed_split(processed_dir, split)
+            _write_training_artifacts(processed_dir)
+
+            config = _minimal_config(processed_dir)
+
+            dm = data_module_from_config(config)
+            dm.setup("fit")
+            batch = next(iter(dm.train_dataloader()))
+
+            self.assertIn("s_1_true", batch.ndata)
+            self.assertIn("se_1_true", batch.edata)
+            self.assertIn("s_0", batch.ndata)
+            self.assertIn("se_0", batch.edata)
+            self.assertTrue(torch.equal(batch.edata["se_1_true"][0], batch.edata["se_1_true"][1]))
 
     def test_process_qm9_uses_local_featurizer_import(self):
         source = (REPO_ROOT / "process_qm9.py").read_text()

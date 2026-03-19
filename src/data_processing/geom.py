@@ -29,12 +29,26 @@ class MoleculeFeaturizer():
 
 
         all_positions, all_atom_types, all_atom_charges, all_bond_types, all_bond_idxs = [], [], [], [], []
+        all_scaffold_atom_masks, all_scaffold_bond_masks = [], []
         n_bond_orders = 5 if self.explicit_aromaticity else 4
         all_bond_order_counts = torch.zeros(n_bond_orders, dtype=torch.int64)
 
         if self.n_cpus == 1:
             for molecule in molecules:
-                positions, atom_types, atom_charges, bond_types, bond_idxs, bond_order_counts = featurize_molecule(molecule, self.atom_map_dict, explicit_aromaticity=self.explicit_aromaticity)
+                (
+                    positions,
+                    atom_types,
+                    atom_charges,
+                    bond_types,
+                    bond_idxs,
+                    bond_order_counts,
+                    scaffold_atom_mask,
+                    scaffold_bond_mask,
+                ) = featurize_molecule(
+                    molecule,
+                    self.atom_map_dict,
+                    explicit_aromaticity=self.explicit_aromaticity,
+                )
                 if positions is not None and self.max_atoms < positions.shape[0]:
                     continue
                 all_positions.append(positions)
@@ -42,6 +56,8 @@ class MoleculeFeaturizer():
                 all_atom_charges.append(atom_charges)
                 all_bond_types.append(bond_types)
                 all_bond_idxs.append(bond_idxs)
+                all_scaffold_atom_masks.append(scaffold_atom_mask)
+                all_scaffold_bond_masks.append(scaffold_bond_mask)
 
                 if bond_order_counts is not None:
                     all_bond_order_counts += bond_order_counts
@@ -49,12 +65,23 @@ class MoleculeFeaturizer():
         else:
             args = [(molecule, self.atom_map_dict, self.explicit_aromaticity) for molecule in molecules]
             results = self.pool.starmap(featurize_molecule, args)
-            for positions, atom_types, atom_charges, bond_types, bond_idxs, bond_order_counts in results:
+            for (
+                positions,
+                atom_types,
+                atom_charges,
+                bond_types,
+                bond_idxs,
+                bond_order_counts,
+                scaffold_atom_mask,
+                scaffold_bond_mask,
+            ) in results:
                 all_positions.append(positions)
                 all_atom_types.append(atom_types)
                 all_atom_charges.append(atom_charges)
                 all_bond_types.append(bond_types)
                 all_bond_idxs.append(bond_idxs)
+                all_scaffold_atom_masks.append(scaffold_atom_mask)
+                all_scaffold_bond_masks.append(scaffold_bond_mask)
 
                 if bond_order_counts is not None:
                     all_bond_order_counts += bond_order_counts
@@ -73,8 +100,24 @@ class MoleculeFeaturizer():
         all_atom_charges = [charge for i, charge in enumerate(all_atom_charges) if i not in failed_idxs]
         all_bond_types = [bond for i, bond in enumerate(all_bond_types) if i not in failed_idxs]
         all_bond_idxs = [idx for i, idx in enumerate(all_bond_idxs) if i not in failed_idxs]
+        all_scaffold_atom_masks = [
+            mask for i, mask in enumerate(all_scaffold_atom_masks) if i not in failed_idxs
+        ]
+        all_scaffold_bond_masks = [
+            mask for i, mask in enumerate(all_scaffold_bond_masks) if i not in failed_idxs
+        ]
 
-        return all_positions, all_atom_types, all_atom_charges, all_bond_types, all_bond_idxs, failed_idxs, all_bond_order_counts
+        return (
+            all_positions,
+            all_atom_types,
+            all_atom_charges,
+            all_bond_types,
+            all_bond_idxs,
+            all_scaffold_atom_masks,
+            all_scaffold_bond_masks,
+            failed_idxs,
+            all_bond_order_counts,
+        )
 
 
 

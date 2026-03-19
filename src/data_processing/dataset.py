@@ -40,6 +40,12 @@ class MoleculeDataset(torch.utils.data.Dataset):
         self.atom_charges = data_dict["atom_charges"]
         self.bond_types = data_dict["bond_types"]
         self.bond_idxs = data_dict["bond_idxs"]
+        self.scaffold_atom_mask = data_dict.get(
+            "scaffold_atom_mask", torch.zeros(self.atom_types.shape[0], dtype=torch.int32)
+        )
+        self.scaffold_bond_mask = data_dict.get(
+            "scaffold_bond_mask", torch.zeros(self.bond_types.shape[0], dtype=torch.int32)
+        )
         self.node_idx_array = data_dict["node_idx_array"]
         self.edge_idx_array = data_dict["edge_idx_array"]
 
@@ -54,31 +60,45 @@ class MoleculeDataset(torch.utils.data.Dataset):
 
         atom_types = self.atom_types[node_start_idx:node_end_idx].float()
         atom_charges = self.atom_charges[node_start_idx:node_end_idx].long()
+        scaffold_atom_mask = self.scaffold_atom_mask[node_start_idx:node_end_idx].long()
         bond_types = self.bond_types[edge_start_idx:edge_end_idx].int()
         bond_idxs = self.bond_idxs[edge_start_idx:edge_end_idx].long()
+        scaffold_bond_mask = self.scaffold_bond_mask[edge_start_idx:edge_end_idx].int()
 
         n_atoms = atom_types.shape[0]
         adj = torch.zeros((n_atoms, n_atoms), dtype=torch.int32)
         adj[bond_idxs[:, 0], bond_idxs[:, 1]] = bond_types
+        scaffold_adj = torch.zeros((n_atoms, n_atoms), dtype=torch.int32)
+        scaffold_adj[bond_idxs[:, 0], bond_idxs[:, 1]] = scaffold_bond_mask
+        scaffold_adj[bond_idxs[:, 1], bond_idxs[:, 0]] = scaffold_bond_mask
 
         upper_edge_idxs = torch.triu_indices(n_atoms, n_atoms, offset=1)
         upper_edge_labels = adj[upper_edge_idxs[0], upper_edge_idxs[1]]
+        upper_scaffold_edge_labels = scaffold_adj[upper_edge_idxs[0], upper_edge_idxs[1]]
         lower_edge_idxs = torch.stack((upper_edge_idxs[1], upper_edge_idxs[0]))
 
         edges = torch.cat((upper_edge_idxs, lower_edge_idxs), dim=1)
         edge_labels = torch.cat((upper_edge_labels, upper_edge_labels))
+        scaffold_edge_labels = torch.cat(
+            (upper_scaffold_edge_labels, upper_scaffold_edge_labels)
+        )
 
         edge_labels = one_hot(edge_labels.to(torch.int64), num_classes=self.n_bond_types).float()
         atom_charges = one_hot(atom_charges + 2, num_classes=6).float()
+        scaffold_atom_mask = one_hot(scaffold_atom_mask, num_classes=2).float()
+        scaffold_edge_labels = one_hot(scaffold_edge_labels.to(torch.int64), num_classes=2).float()
 
         g = dgl.graph((edges[0], edges[1]), num_nodes=n_atoms)
         g.edata["e_1_true"] = edge_labels
+        g.edata["se_1_true"] = scaffold_edge_labels
         g.ndata["a_1_true"] = atom_types
         g.ndata["c_1_true"] = atom_charges
+        g.ndata["s_1_true"] = scaffold_atom_mask
 
         dst_dict = {
             "a": atom_types,
             "c": atom_charges,
+            "s": scaffold_atom_mask,
         }
         prior_node_feats = coupled_node_prior(dst_dict=dst_dict, prior_config=self.prior_config)
         for feat, prior_feat in prior_node_feats.items():
@@ -88,8 +108,13 @@ class MoleculeDataset(torch.utils.data.Dataset):
         upper_edge_mask[: upper_edge_idxs.shape[1]] = True
         g.edata["e_0"] = edge_prior(
             upper_edge_mask,
-            self.prior_config["e"],
+            self.prior_config.get("e"),
             explicit_aromaticity=self.explicit_aromaticity,
+        )
+        g.edata["se_0"] = edge_prior(
+            upper_edge_mask,
+            self.prior_config.get("se"),
+            n_edge_classes=2,
         )
 
         return g

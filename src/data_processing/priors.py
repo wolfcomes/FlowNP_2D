@@ -193,7 +193,7 @@ def coupled_node_prior(dst_dict: dict,
     for feat in dst_dict.keys():
 
         # get the prior configuration for this feature
-        feat_prior_config = prior_config[feat]
+        feat_prior_config = prior_config.get(feat, {'align': False, 'kwargs': {}})
 
         # get destination features (t=1)
         dst_feat = dst_dict[feat]
@@ -213,14 +213,21 @@ def coupled_node_prior(dst_dict: dict,
 
     return prior_dict
 
-def edge_prior(upper_edge_mask: torch.Tensor, edge_prior_config: dict, explicit_aromaticity: bool = False):
+def edge_prior(
+    upper_edge_mask: torch.Tensor,
+    edge_prior_config: dict,
+    explicit_aromaticity: bool = False,
+    n_edge_classes: int = None,
+):
 
     n_upper_edges = upper_edge_mask.sum().item()
     prior_fn = train_prior_register['ctmc']
-    upper_edge_prior = prior_fn(n_upper_edges, 5 if explicit_aromaticity else 4, **edge_prior_config['kwargs'])
+    if n_edge_classes is None:
+        n_edge_classes = 5 if explicit_aromaticity else 4
+    edge_prior_config = edge_prior_config or {'kwargs': {}}
+    upper_edge_prior = prior_fn(n_upper_edges, n_edge_classes, **edge_prior_config.get('kwargs', {}))
 
     edge_prior = torch.zeros(upper_edge_mask.shape[0], upper_edge_prior.shape[1])
     edge_prior[upper_edge_mask] = upper_edge_prior
     edge_prior[~upper_edge_mask] = upper_edge_prior
     return edge_prior
-
