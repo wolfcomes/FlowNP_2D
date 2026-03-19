@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+data/
+results/
+evaluation_results/
+lightning_logs/
+
+checkpoints_qm9/**/checkpoints/
+checkpoints_coconut/**/checkpoints/
+
+*.ckpt
+*.pt

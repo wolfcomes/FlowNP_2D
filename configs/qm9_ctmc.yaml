@@ -1,0 +1,88 @@
+checkpointing:
+  every_n_epochs: 1
+  monitor: val_total_loss
+  save_last: true
+  save_top_k: 3
+dataset:
+  atom_map:
+  - C
+  - H
+  - N
+  - O
+  - F
+  dataset_name: qm9
+  dataset_size: null
+  processed_data_dir: data/qm9_kekulized
+  raw_data_dir: data/qm9_raw
+  explicit_aromaticity: false
+
+interpolant_scheduler:
+  params:
+    a: 1.4
+    c: 1.4
+    e: 1.4
+  schedule_type:
+    a: linear
+    c: linear
+    e: linear
+lr_scheduler:
+  base_lr: 0.00025
+  restart_interval: 19
+  restart_type: linear
+  warmup_length: 1.0
+  weight_decay: 1.0e-12
+mol_fm:
+  prior_config:
+    a:
+      align: false
+      kwargs: {}
+    c:
+      align: false
+      kwargs: {}
+    e:
+      align: false
+      kwargs: {}
+  target_blur: 0.0
+  time_scaled_loss: false
+  total_loss_weights:
+    a: 0.4
+    c: 1.0
+    e: 2.0
+  weight_ae: true
+  exclude_charges: false
+
+
+resume:
+  run_id: paiokchu
+training:
+  batch_size: 64
+  evaluation:
+    mols_to_sample: 128
+    sample_interval: 1.0
+    val_loss_interval: 1.0
+  max_num_edges: 400000.0
+  num_workers: 8
+  output_dir: checkpoints_qm9/
+  trainer_args:
+    accelerator: gpu
+    accumulate_grad_batches: 1
+    devices: 1
+    gradient_clip_algorithm: value
+    gradient_clip_val: 1.0
+    limit_val_batches: 1.0
+    max_epochs: 20
+    num_nodes: 1
+    strategy: auto
+vector_field:
+  convs_per_update: 1
+  dfm_type: campbell
+  high_confidence_threshold: 0.0
+  message_norm: 100
+  n_random_node_feats: 8
+  n_hidden_edge_feats: 256
+  n_hidden: 256
+  n_molecule_updates: 8
+  n_recycles: 1
+  separate_mol_updaters: true
+  stochasticity: 10.0
+  self_conditioning: false
